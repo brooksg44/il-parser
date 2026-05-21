@@ -1,0 +1,9 @@
+*.fasl
+*.fas
+*.lib
+*.fsl
+*.dfsl
+*.pfsl
+*.abcl
+*.lx32fsl
+*.lx64fsl
