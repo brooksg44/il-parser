@@ -1,76 +1,191 @@
 (defpackage :iec-il-parser
   (:use :cl :alexandria)
-  (:export :parse-il
-           :dump-il
-           :il-statement
+  (:export :il-statement
            :il-statement-label
            :il-statement-opcode
            :il-statement-operands
-           :validate-iec-syntax))
+           :il-operand
+           :il-address
+           :il-literal
+           :operand-raw
+           :operand-area
+           :operand-size
+           :operand-byte-index
+           :operand-bit-index
+           :operand-value
+           :il-parse-error
+           :parse-error-token
+           :parse-error-message
+           :parse-il
+           :dump-il
+           :validate-iec-syntax
+           :demo))
 
 (in-package :iec-il-parser)
 
 ;; ========================
-;; 1. AST Node
+;; 1. Conditions
 ;; ========================
-(defstruct (il-statement (:constructor %make-il-statement))
-  (label nil :type (or null string))
-  (opcode nil :type string)
-  (operands '() :type list))
-
-(defun make-il-statement (&key (label nil) (opcode nil) (operands '()))
-  (%make-il-statement :label label :opcode opcode :operands (coerce operands 'list)))
+(define-condition il-parse-error (error)
+  ((token   :initarg :token   :reader parse-error-token)
+   (message :initarg :message :reader parse-error-message))
+  (:report (lambda (c s)
+             (format s "IEC 61131-3 IL Parse Error: ~A (at ~A)"
+                     (parse-error-message c)
+                     (parse-error-token c)))))
 
 ;; ========================
-;; 2. Lexer (Tokenizer)
+;; 2. AST Nodes (CLOS)
 ;; ========================
-;; Fix 1: proper alist with dotted pairs + :test #'equal for string keys
-(defparameter *il-keywords*
-  (alexandria:alist-hash-table
-   '(("LD" . :opcode) ("LDN" . :opcode) ("ST" . :opcode) ("STN" . :opcode)
-     ("AND" . :opcode) ("ANDN" . :opcode) ("OR" . :opcode) ("ORN" . :opcode)
-     ("XOR" . :opcode) ("XORN" . :opcode) ("NOT" . :opcode) ("NOTN" . :opcode)
-     ("ADD" . :opcode) ("SUB" . :opcode) ("MUL" . :opcode) ("DIV" . :opcode)
-     ("EQ" . :opcode) ("GT" . :opcode) ("GE" . :opcode) ("LT" . :opcode) ("LE" . :opcode)
-     ("NE" . :opcode) ("CALL" . :opcode) ("RET" . :opcode) ("NOP" . :opcode)
-     ("SET" . :opcode) ("RESET" . :opcode) ("JMP" . :opcode) ("JMPN" . :opcode)
-     ("CAL" . :opcode) ("CALN" . :opcode) ("JCN" . :opcode)
-     ("TON" . :opcode) ("TOF" . :opcode) ("TP" . :opcode) ("CTU" . :opcode) ("CTD" . :opcode)
-     ("MOVD" . :opcode) ("MOVB" . :opcode) ("MOVE" . :opcode) ("SWAP" . :opcode)
-     ("SEL" . :opcode) ("MAX" . :opcode) ("MIN" . :opcode) ("MUL_REAL" . :opcode)
-     ("DIV_REAL" . :opcode) ("ADD_REAL" . :opcode) ("SUB_REAL" . :opcode)
-     ("ABS" . :opcode) ("SQRT" . :opcode) ("LN" . :opcode) ("EXP" . :opcode)
-     ("SIN" . :opcode) ("COS" . :opcode) ("TAN" . :opcode) ("TRUNC" . :opcode)
-     ("FRAC" . :opcode) ("FLOOR" . :opcode) ("CEIL" . :opcode)
-     ("MOD" . :opcode) ("BIT_AND" . :opcode) ("BIT_OR" . :opcode) ("BIT_XOR" . :opcode)
-     ("BIT_NOT" . :opcode) ("SHL" . :opcode) ("SHR" . :opcode) ("ROL" . :opcode) ("ROR" . :opcode))
-   :test #'equal))
+(defclass il-statement ()
+  ((label    :initarg :label    :accessor il-statement-label    :initform nil)
+   (opcode   :initarg :opcode   :accessor il-statement-opcode   :initform nil)
+   (operands :initarg :operands :accessor il-statement-operands :initform '())))
 
+(defclass il-operand ()
+  ((raw :initarg :raw :accessor operand-raw)))
+
+(defclass il-address (il-operand)
+  ((area       :initarg :area       :accessor operand-area)
+   (size       :initarg :size       :accessor operand-size       :initform :bit)
+   (byte-index :initarg :byte-index :accessor operand-byte-index)
+   (bit-index  :initarg :bit-index  :accessor operand-bit-index  :initform nil)))
+
+(defclass il-literal (il-operand)
+  ((value :initarg :value :accessor operand-value)))
+
+;; ========================
+;; 3. Comment Stripper
+;; ========================
+(defun strip-comments (source)
+  "Remove ;, //, and (* *) comments, preserving newlines for line structure."
+  (with-output-to-string (out)
+    (let ((i 0)
+          (len (length source)))
+      (loop while (< i len) do
+        (cond
+          ;; (* ... *) block comment (may span lines)
+          ((and (< (1+ i) len)
+                (char= (char source i) #\()
+                (char= (char source (1+ i)) #\*))
+           (incf i 2)
+           (loop
+             (when (>= (1+ i) len)
+               (setf i len)
+               (return))
+             (cond ((and (char= (char source i) #\*)
+                         (char= (char source (1+ i)) #\)))
+                    (incf i 2)
+                    (return))
+                   ((char= (char source i) #\Newline)
+                    (write-char #\Newline out)
+                    (incf i))
+                   (t (incf i)))))
+          ;; // line comment
+          ((and (< (1+ i) len)
+                (char= (char source i) #\/)
+                (char= (char source (1+ i)) #\/))
+           (loop while (and (< i len) (char/= (char source i) #\Newline))
+                 do (incf i)))
+          ;; ; line comment
+          ((char= (char source i) #\;)
+           (loop while (and (< i len) (char/= (char source i) #\Newline))
+                 do (incf i)))
+          ;; Regular character
+          (t (write-char (char source i) out)
+             (incf i)))))))
+
+;; ========================
+;; 4. Opcode Set (keyword-based, EQ lookup)
+;; ========================
+(defparameter *il-opcodes*
+  (let ((ht (make-hash-table :test #'eq)))
+    (dolist (op '(:LD :LDN :ST :STN
+                  :AND :ANDN :OR :ORN :XOR :XORN :NOT :NOTN
+                  :ADD :SUB :MUL :DIV
+                  :EQ :GT :GE :LT :LE :NE
+                  :CALL :RET :NOP
+                  :SET :RESET :JMP :JMPN :CAL :CALN :JCN
+                  :TON :TOF :TP :CTU :CTD
+                  :MOVD :MOVB :MOVE :SWAP
+                  :SEL :MAX :MIN
+                  :MUL_REAL :DIV_REAL :ADD_REAL :SUB_REAL
+                  :ABS :SQRT :LN :EXP
+                  :SIN :COS :TAN :TRUNC :FRAC :FLOOR :CEIL
+                  :MOD :BIT_AND :BIT_OR :BIT_XOR :BIT_NOT
+                  :SHL :SHR :ROL :ROR))
+      (setf (gethash op ht) t))
+    ht))
+
+;; ========================
+;; 5. Operand Parser
+;; ========================
+(defun parse-operand (raw)
+  "Parse a raw operand string into a structured il-operand."
+  (let ((up (string-upcase raw)))
+    (multiple-value-bind (match groups)
+        (cl-ppcre:scan-to-strings
+         "^([IQM])([XBWDL])?([0-9]+)(?:\\.([0-9]+))?$" up)
+      (cond
+        ;; IEC address (I0.0, Q1.3, MW10, etc.)
+        (match
+         (make-instance 'il-address
+           :raw raw
+           :area (ecase (char (aref groups 0) 0)
+                   (#\I :input) (#\Q :output) (#\M :memory))
+           :size (if (aref groups 1)
+                     (ecase (char (aref groups 1) 0)
+                       (#\X :bit) (#\B :byte) (#\W :word)
+                       (#\D :dword) (#\L :lword))
+                     :bit)
+           :byte-index (parse-integer (aref groups 2))
+           :bit-index (when (aref groups 3)
+                        (parse-integer (aref groups 3)))))
+        ;; Numeric literal
+        ((cl-ppcre:scan "^-?[0-9]" up)
+         (make-instance 'il-literal :raw raw
+           :value (read-from-string raw)))
+        ;; Boolean literal
+        ((member up '("TRUE" "FALSE") :test #'string=)
+         (make-instance 'il-literal :raw raw
+           :value (string= up "TRUE")))
+        ;; Everything else (variable names, function block names, etc.)
+        (t
+         (make-instance 'il-operand :raw raw))))))
+
+;; ========================
+;; 6. Lexer
+;; ========================
 (defun lex (source)
-  (with-input-from-string (in source)
-    (let ((tokens '()))
+  "Tokenize IL source into a list of (type . value) cons cells."
+  (let ((cleaned (strip-comments source))
+        (tokens '()))
+    (with-input-from-string (in cleaned)
       (loop for line = (read-line in nil nil)
             while line
-            ;; Fix 2: removed invalid :over-write keyword; added ; comment style
-            do (let ((cleaned (cl-ppcre:regex-replace "(?:;.*|//.*|\\(\\*.*?\\*\\))" line "")))
-                 (when (string/= cleaned "")
-                   (loop for token in (cl-ppcre:split "[ \t,;]+" cleaned)
-                         do (when (string/= token "")
-                              (let* ((tok (string-trim " " token))
-                                     (tok-up (string-upcase tok)))
-                                (cond ((and (> (length tok) 1)
-                                            (char= (aref tok (1- (length tok))) #\:))
-                                       (push (cons :label (subseq tok 0 (1- (length tok)))) tokens))
-                                      ((gethash tok-up *il-keywords*)
-                                       (push (cons :opcode tok-up) tokens))
-                                      (t
-                                       (push (cons :operand tok) tokens)))))))))
-      (nreverse (push (cons :eof nil) tokens)))))
+            do (loop for tok in (cl-ppcre:split "[ \\t,]+" line)
+                     do (when (and tok (string/= tok ""))
+                          (let* ((tok-up (string-upcase tok))
+                                 (kw (find-symbol tok-up :keyword)))
+                            (cond
+                              ;; Label: trailing colon
+                              ((and (> (length tok) 1)
+                                    (char= (char tok (1- (length tok))) #\:))
+                               (push (cons :label (subseq tok 0 (1- (length tok))))
+                                     tokens))
+                              ;; Known opcode
+                              ((and kw (gethash kw *il-opcodes*))
+                               (push (cons :opcode kw) tokens))
+                              ;; Operand
+                              (t
+                               (push (cons :operand tok) tokens))))))))
+    (nreverse (push (cons :eof nil) tokens))))
 
 ;; ========================
-;; 3. Parser (Recursive Descent)
+;; 7. Parser
 ;; ========================
 (defun parse-il (source)
+  "Parse IL source string into a list of il-statement objects."
   (let ((tokens (lex source)))
     (flet ((peek () (first tokens))
            (advance () (pop tokens)))
@@ -81,41 +196,65 @@
                    (when (and (peek) (eq (car (peek)) :label))
                      (setf label (cdr (advance))))
                    (unless (and (peek) (eq (car (peek)) :opcode))
-                     (error "IEC 61131-3 IL Syntax Error: expected opcode at ~A" (peek)))
-                   (setf opcode (cdr (advance)))
+                     (restart-case
+                         (error 'il-parse-error
+                                :token (peek)
+                                :message "expected opcode")
+                       (skip-statement ()
+                         :report "Skip this statement and continue parsing"
+                         (loop while (and (peek)
+                                         (not (member (car (peek))
+                                                      '(:label :opcode :eof))))
+                               do (advance))
+                         (return-from parse-statement nil))
+                       (use-nop ()
+                         :report "Insert a NOP instruction"
+                         (setf opcode :NOP))))
+                   (unless opcode
+                     (setf opcode (cdr (advance))))
                    (loop while (and (peek) (eq (car (peek)) :operand))
-                         do (push (cdr (advance)) operands))
-                   (make-il-statement :label label :opcode opcode :operands (nreverse operands)))))
+                         do (push (parse-operand (cdr (advance))) operands))
+                   (make-instance 'il-statement
+                                  :label label
+                                  :opcode opcode
+                                  :operands (nreverse operands)))))
         (let ((statements '()))
           (loop until (eq (car (peek)) :eof)
-                do (push (parse-statement) statements))
+                do (let ((stmt (parse-statement)))
+                     (when stmt (push stmt statements))))
           (nreverse statements))))))
 
 ;; ========================
-;; 4. Utilities & Demo
+;; 8. Utilities
 ;; ========================
 (defun dump-il (statements)
+  "Pretty-print IL statements to stdout."
   (format t ";; IEC 61131-3 IL AST (~A statements)~%" (length statements))
   (dolist (stmt statements)
     (when (il-statement-label stmt)
       (format t ";; ~A:~%" (il-statement-label stmt)))
-    (format t "   ~A ~A~%" (il-statement-opcode stmt)
+    (format t "   ~A ~A~%"
+            (symbol-name (il-statement-opcode stmt))
             (if (il-statement-operands stmt)
-                (format nil "~{~A ~}" (il-statement-operands stmt))
+                (format nil "~{~A ~}"
+                        (mapcar #'operand-raw (il-statement-operands stmt)))
                 ""))))
 
 (defun validate-iec-syntax (statements)
+  "Return a list of semantic error strings, or NIL if valid."
   (let ((errors '()))
     (dolist (stmt statements)
-      (when (string= (il-statement-opcode stmt) "CALL")
+      (when (eq (il-statement-opcode stmt) :CALL)
         (unless (il-statement-operands stmt)
           (push "CALL requires at least a procedure name" errors)))
-      (when (member (il-statement-opcode stmt) '("ADD" "SUB" "MUL" "DIV") :test #'string=)
+      (when (member (il-statement-opcode stmt) '(:ADD :SUB :MUL :DIV))
         (unless (>= (length (il-statement-operands stmt)) 2)
           (push "Arithmetic ops require ≥2 operands" errors))))
     errors))
 
-;; ▶ Example IEC IL Program (labels use standard trailing-colon format)
+;; ========================
+;; 9. Sample & Demo
+;; ========================
 (defparameter *sample-iec-il*
   "
   ; Motor Latch Control
@@ -127,8 +266,9 @@
   RET
   ")
 
-;; Fix 9: declare *parsed* before setf
-(defparameter *parsed* nil)
-(setf *parsed* (parse-il *sample-iec-il*))
-(dump-il *parsed*)
-(format t "Validation errors: ~A~%" (validate-iec-syntax *parsed*))
+(defun demo ()
+  "Parse and display the sample motor latch program."
+  (let ((parsed (parse-il *sample-iec-il*)))
+    (dump-il parsed)
+    (format t "Validation errors: ~A~%" (validate-iec-syntax parsed))
+    parsed))
