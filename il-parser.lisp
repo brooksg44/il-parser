@@ -144,7 +144,12 @@
         ;; Numeric literal
         ((cl-ppcre:scan "^-?[0-9]" up)
          (make-instance 'il-literal :raw raw
-           :value (read-from-string raw)))
+           :value (multiple-value-bind (int end)
+                       (parse-integer raw :junk-allowed t)
+                     (if (and int (= end (length raw)))
+                         int
+                         (let ((*read-eval* nil))
+                           (read-from-string raw))))))
         ;; Boolean literal
         ((member up '("TRUE" "FALSE") :test #'string=)
          (make-instance 'il-literal :raw raw
