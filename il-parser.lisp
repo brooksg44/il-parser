@@ -16,6 +16,8 @@
            :il-parse-error
            :parse-error-token
            :parse-error-message
+           :skip-statement
+           :use-nop
            :parse-il
            :dump-il
            :validate-iec-syntax
@@ -53,6 +55,26 @@
 
 (defclass il-literal (il-operand)
   ((value :initarg :value :accessor operand-value)))
+
+(defmethod print-object ((stmt il-statement) stream)
+  (print-unreadable-object (stmt stream :type t)
+    (when (il-statement-label stmt)
+      (format stream "~A: " (il-statement-label stmt)))
+    (format stream "~A~@[ ~{~A~^ ~}~]"
+            (il-statement-opcode stmt)
+            (mapcar #'operand-raw (il-statement-operands stmt)))))
+
+(defmethod print-object ((op il-operand) stream)
+  (print-unreadable-object (op stream :type t)
+    (write-string (operand-raw op) stream)))
+
+(defmethod print-object ((op il-address) stream)
+  (print-unreadable-object (op stream :type t)
+    (write-string (operand-raw op) stream)))
+
+(defmethod print-object ((op il-literal) stream)
+  (print-unreadable-object (op stream :type t)
+    (princ (operand-value op) stream)))
 
 ;; ========================
 ;; 3. Comment Stripper
@@ -142,7 +164,7 @@
            :bit-index (when (aref groups 3)
                         (parse-integer (aref groups 3)))))
         ;; Numeric literal
-        ((cl-ppcre:scan "^-?[0-9]" up)
+        ((cl-ppcre:scan "^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$" up)
          (make-instance 'il-literal :raw raw
            :value (multiple-value-bind (int end)
                        (parse-integer raw :junk-allowed t)
@@ -169,7 +191,7 @@
       (loop for line = (read-line in nil nil)
             while line
             do (loop for tok in (cl-ppcre:split "[ \\t,]+" line)
-                     do (when (and tok (string/= tok ""))
+                     do (when (string/= tok "")
                           (let* ((tok-up (string-upcase tok))
                                  (kw (find-symbol tok-up :keyword)))
                             (cond
