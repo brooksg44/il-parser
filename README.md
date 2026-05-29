@@ -14,16 +14,34 @@ A Common Lisp lexer, parser, and validator for IEC 61131-3 Instruction List (IL)
 - [Alexandria](https://github.com/sharplispers/alexandria)
 - [cl-ppcre](https://github.com/edicl/cl-ppcre)
 
-Install via Quicklisp:
+## Installation
+
+### Via ASDF
+
+Symlink or copy this directory into your ASDF source registry (e.g. `~/quicklisp/local-projects/`):
+
+```sh
+ln -s /path/to/il-parser ~/quicklisp/local-projects/il-parser
+```
+
+Then load:
+
+```lisp
+(asdf:load-system "il-parser")
+```
+
+### Manual
+
+Load dependencies via Quicklisp first, then load the file directly:
 
 ```lisp
 (ql:quickload '(:alexandria :cl-ppcre))
+(load "il-parser.lisp")
 ```
 
 ## Usage
 
 ```lisp
-(load "il-parser.lisp")
 (in-package :iec-il-parser)
 
 (defparameter *program*

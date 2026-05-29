@@ -3,9 +3,9 @@
   (:export :parse-il
            :dump-il
            :il-statement
-           :il-label
-           :il-opcode
-           :il-operands
+           :il-statement-label
+           :il-statement-opcode
+           :il-statement-operands
            :validate-iec-syntax))
 
 (in-package :iec-il-parser)
@@ -57,14 +57,11 @@
                    (loop for token in (cl-ppcre:split "[ \t,;]+" cleaned)
                          do (when (string/= token "")
                               (let* ((tok (string-trim " " token))
-                                     (tok-up (string-upcase tok))
-                                     ;; Fix 3: correct arg order — target then replacement
-                                     (base (cl-ppcre:regex-replace "[NP]$" tok-up "")))
-                                ;; Fix 4: label detection — trailing colon only (standard IL)
+                                     (tok-up (string-upcase tok)))
                                 (cond ((and (> (length tok) 1)
                                             (char= (aref tok (1- (length tok))) #\:))
                                        (push (cons :label (subseq tok 0 (1- (length tok)))) tokens))
-                                      ((gethash base *il-keywords*)
+                                      ((gethash tok-up *il-keywords*)
                                        (push (cons :opcode tok-up) tokens))
                                       (t
                                        (push (cons :operand tok) tokens)))))))))
@@ -73,30 +70,26 @@
 ;; ========================
 ;; 3. Parser (Recursive Descent)
 ;; ========================
-(defparameter *tok-stream* nil)
-
-(defun next-token () (pop *tok-stream*))
-(defun peek-token () (first *tok-stream*))
-
-(defun parse-statement ()
-  (let ((label nil)
-        (opcode nil)
-        (operands '()))
-    (when (and (peek-token) (eq (car (peek-token)) :label))
-      (setf label (cdr (pop *tok-stream*))))
-    (unless (and (peek-token) (eq (car (peek-token)) :opcode))
-      (error "IEC 61131-3 IL Syntax Error: expected opcode at ~A" (peek-token)))
-    (setf opcode (cdr (pop *tok-stream*)))
-    (loop while (and (peek-token) (eq (car (peek-token)) :operand))
-          do (push (cdr (pop *tok-stream*)) operands))
-    (make-il-statement :label label :opcode opcode :operands (nreverse operands))))
-
 (defun parse-il (source)
-  (setf *tok-stream* (lex source))
-  (let ((statements '()))
-    (loop until (eq (car (peek-token)) :eof)
-          do (push (parse-statement) statements))
-    (nreverse statements)))
+  (let ((tokens (lex source)))
+    (flet ((peek () (first tokens))
+           (advance () (pop tokens)))
+      (labels ((parse-statement ()
+                 (let ((label nil)
+                       (opcode nil)
+                       (operands '()))
+                   (when (and (peek) (eq (car (peek)) :label))
+                     (setf label (cdr (advance))))
+                   (unless (and (peek) (eq (car (peek)) :opcode))
+                     (error "IEC 61131-3 IL Syntax Error: expected opcode at ~A" (peek)))
+                   (setf opcode (cdr (advance)))
+                   (loop while (and (peek) (eq (car (peek)) :operand))
+                         do (push (cdr (advance)) operands))
+                   (make-il-statement :label label :opcode opcode :operands (nreverse operands)))))
+        (let ((statements '()))
+          (loop until (eq (car (peek)) :eof)
+                do (push (parse-statement) statements))
+          (nreverse statements))))))
 
 ;; ========================
 ;; 4. Utilities & Demo
